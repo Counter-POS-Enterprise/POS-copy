@@ -20,6 +20,7 @@ import com.alvinb.counterpos.data.model.TimeSlot
 import com.alvinb.counterpos.data.remote.AccountSnapshot
 import com.alvinb.counterpos.data.remote.AdminAuditEvent
 import com.alvinb.counterpos.data.remote.AdminBusiness
+import com.alvinb.counterpos.data.remote.PlatformBillingSettings
 import com.alvinb.counterpos.data.remote.AuthSession
 import com.alvinb.counterpos.data.remote.BusinessMembership
 import com.alvinb.counterpos.data.remote.CounterReportRow
@@ -388,9 +389,12 @@ class CounterPosRepository(
         businessType: String = "big_club",
         businessSize: String = "medium",
         inventoryMode: String = "shared",
-        counterCount: Int = 1
+        counterCount: Int = 1,
+        ownerPhone: String = ""
     ): SessionSnapshot = withContext(Dispatchers.IO) {
         require(name.trim().length in 1..120) { "Enter a business name (up to 120 characters)." }
+        val normalizedOwnerPhone = SubscriptionManager.normalizeKenyanPhone(ownerPhone)
+            ?: throw IllegalArgumentException("Enter a valid Kenyan owner mobile number.")
         require(businessType in setOf("big_club", "counter_seller")) { "Choose a valid business type." }
         val isLiquorStore = businessType == "counter_seller"
         val selectedSize = if (isLiquorStore) "medium" else businessSize
@@ -428,6 +432,10 @@ class CounterPosRepository(
                 throw e
             }
         }
+        val createdSession = loadAccount(autoSelectSingleBusiness = true)
+        val shopId = createdSession.activeBusiness?.shopId
+            ?: throw IllegalStateException("Business was created, but its owner profile could not be loaded.")
+        remote.setOwnerBusinessPhone(shopId, normalizedOwnerPhone)
         loadAccount(autoSelectSingleBusiness = true)
     }
 
@@ -511,7 +519,20 @@ class CounterPosRepository(
                                 closedAt = obj.optString("closed_at").takeIf(String::isNotBlank),
                                 lifecycleReason = obj.optString("lifecycle_reason").takeIf(String::isNotBlank),
                                 counterInventoryMode = obj.optString("counter_inventory_mode", "shared"),
-                                counterCount = obj.optLong("counter_count", 1)
+                                counterCount = obj.optLong("counter_count", 1),
+                                subscriptionStatus = obj.optString("subscription_status", "unknown"),
+                                trialEndsAt = obj.optString("trial_ends_at").takeIf(String::isNotBlank),
+                                subscriptionEndsAt = obj.optString("subscription_ends_at").takeIf(String::isNotBlank),
+                                subscriptionPriceKsh = obj.optInt("subscription_price_ksh", 2500).let { if (it <= 0) 2500 else it },
+                                subscriptionPlanDays = obj.optInt("subscription_plan_days", 30).let { if (it <= 0) 30 else it },
+                                lastPaymentAt = obj.optString("last_payment_at").takeIf(String::isNotBlank),
+                                lastPaymentReceipt = obj.optString("last_payment_receipt").takeIf(String::isNotBlank),
+                                lastPaymentPhone = obj.optString("last_payment_phone").takeIf(String::isNotBlank),
+                                customBillingNote = obj.optString("custom_billing_note").takeIf(String::isNotBlank),
+                                paymentLockActive = obj.optBoolean("payment_lock_active", false),
+                                paymentLockAmountKsh = obj.optInt("payment_lock_amount_ksh", 0),
+                                paymentLockReason = obj.optString("payment_lock_reason").takeIf(String::isNotBlank),
+                                paymentLockStartedAt = obj.optString("payment_lock_started_at").takeIf(String::isNotBlank)
                             )
                         )
                     }
@@ -544,6 +565,19 @@ class CounterPosRepository(
                         .put("lifecycle_reason", b.lifecycleReason ?: "")
                         .put("counter_inventory_mode", b.counterInventoryMode)
                         .put("counter_count", b.counterCount)
+                        .put("subscription_status", b.subscriptionStatus)
+                        .put("trial_ends_at", b.trialEndsAt ?: "")
+                        .put("subscription_ends_at", b.subscriptionEndsAt ?: "")
+                        .put("subscription_price_ksh", b.subscriptionPriceKsh)
+                        .put("subscription_plan_days", b.subscriptionPlanDays)
+                        .put("last_payment_at", b.lastPaymentAt ?: "")
+                        .put("last_payment_receipt", b.lastPaymentReceipt ?: "")
+                        .put("last_payment_phone", b.lastPaymentPhone ?: "")
+                        .put("custom_billing_note", b.customBillingNote ?: "")
+                        .put("payment_lock_active", b.paymentLockActive)
+                        .put("payment_lock_amount_ksh", b.paymentLockAmountKsh)
+                        .put("payment_lock_reason", b.paymentLockReason ?: "")
+                        .put("payment_lock_started_at", b.paymentLockStartedAt ?: "")
                 )
             }
             adminCachePrefs.edit().putString("admin_businesses", array.toString()).apply()
@@ -621,6 +655,26 @@ class CounterPosRepository(
         } catch (error: Exception) {
             if (cached.isNotEmpty()) cached else throw error
         }
+    }
+
+    suspend fun refreshAdminBusinesses(): List<AdminBusiness> = withContext(Dispatchers.IO) {
+        remote.adminBusinesses().also(::saveCachedAdminBusinesses)
+    }
+
+    suspend fun adminPlatformBillingSettings(): PlatformBillingSettings = withContext(Dispatchers.IO) {
+        require(account?.isPlatformAdmin == true) { "Only a platform administrator can view global billing settings." }
+        remote.adminPlatformBillingSettings()
+    }
+
+    suspend fun adminUpdatePlatformBillingSettings(
+        trialDurationDays: Int,
+        subscriptionPriceKsh: Int
+    ): PlatformBillingSettings = withContext(Dispatchers.IO) {
+        require(account?.isPlatformAdmin == true) { "Only a platform administrator can change global billing settings." }
+        val updated = remote.adminUpdatePlatformBillingSettings(trialDurationDays, subscriptionPriceKsh)
+        val freshBusinesses = remote.adminBusinesses()
+        saveCachedAdminBusinesses(freshBusinesses)
+        updated
     }
 
     suspend fun adminAuditEvents(shopId: String = ""): List<AdminAuditEvent> = withContext(Dispatchers.IO) {
@@ -712,10 +766,15 @@ class CounterPosRepository(
         businessType: String,
         businessSize: String,
         inventoryMode: String,
-        counterCount: Int
+        counterCount: Int,
+        ownerPhone: String
     ): AdminBusinessCreationResult {
+        val normalizedOwnerPhone = SubscriptionManager.normalizeKenyanPhone(ownerPhone)
+            ?: throw IllegalArgumentException("Enter a valid Kenyan owner mobile number.")
         val createdRow = remote.adminCreateBusiness(name, ownerEmail.takeIf { it.isNotBlank() }, businessType, businessSize, inventoryMode, counterCount)
         val createdShopId = createdRow.optString("id").takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Business was created but no business ID was returned.")
+        remote.setOwnerBusinessPhone(createdShopId, normalizedOwnerPhone)
         return AdminBusinessCreationResult(createdShopId, remote.adminBusinesses())
     }
 
@@ -742,6 +801,84 @@ class CounterPosRepository(
         publishAccount()
     }
 
+    suspend fun adminUpdateShopSubscription(
+        shopId: String,
+        priceKsh: Int? = null,
+        endsAtIso: String? = null,
+        status: String? = null,
+        planDays: Int? = null,
+        trialEndsAtIso: String? = null,
+        note: String? = null
+    ): List<AdminBusiness> = withContext(Dispatchers.IO) {
+        remote.adminUpdateShopSubscription(
+            shopId = shopId,
+            priceKsh = priceKsh,
+            endsAtIso = endsAtIso,
+            status = status,
+            planDays = planDays,
+            trialEndsAtIso = trialEndsAtIso,
+            note = note
+        )
+        val fresh = remote.adminBusinesses()
+        saveCachedAdminBusinesses(fresh)
+        fresh
+    }
+
+    suspend fun adminSetShopPaymentLock(
+        shopId: String,
+        locked: Boolean,
+        amountKsh: Int? = null,
+        reason: String? = null
+    ): List<AdminBusiness> = withContext(Dispatchers.IO) {
+        require(account?.isPlatformAdmin == true) { "Only a platform administrator can change a payment lock." }
+        remote.adminSetShopPaymentLock(shopId, locked, amountKsh, reason)
+        val fresh = remote.adminBusinesses()
+        saveCachedAdminBusinesses(fresh)
+        fresh
+    }
+
+    suspend fun initiateSubscriptionStkPush(
+        phoneNumber: String
+    ): com.alvinb.counterpos.data.remote.DarajaStkResponse = withContext(Dispatchers.IO) {
+        val shop = activeBusiness ?: throw IllegalStateException("Select an active business first.")
+        remote.initiateDarajaStkPush(
+            shopId = shop.shopId,
+            phoneNumber = phoneNumber
+        )
+    }
+
+    suspend fun checkSubscriptionStatus(shopId: String? = null): com.alvinb.counterpos.data.remote.SubscriptionStatusResult = withContext(Dispatchers.IO) {
+        val targetShopId = shopId ?: activeBusiness?.shopId ?: throw IllegalStateException("Select an active business first.")
+        remote.checkDarajaStkStatus(targetShopId)
+    }
+
+    suspend fun verifySubscriptionPaymentStatus(
+        checkoutRequestId: String? = null
+    ): com.alvinb.counterpos.data.remote.DarajaPaymentStatusResponse = withContext(Dispatchers.IO) {
+        val shop = activeBusiness ?: throw IllegalStateException("Select an active business first.")
+        remote.verifyDarajaPaymentStatus(shop.shopId, checkoutRequestId)
+    }
+
+    suspend fun refreshActiveBusinessSubscription(): SessionSnapshot = withContext(Dispatchers.IO) {
+        val currentActive = activeBusiness ?: return@withContext session.value
+        try {
+            val statusResult = remote.checkDarajaStkStatus(currentActive.shopId)
+            val updatedMembership = SubscriptionManager.mergeServerSubscriptionStatus(
+                membership = currentActive,
+                status = statusResult,
+                verifiedAtMillis = System.currentTimeMillis()
+            )
+            activeBusiness = updatedMembership
+            account = account?.copy(
+                memberships = account!!.memberships.map { if (it.shopId == currentActive.shopId) updatedMembership else it }
+            )
+            saveOfflineAccount(account!!, currentActive.shopId)
+            publishAccount()
+        } catch (_: Exception) {
+            session.value
+        }
+    }
+
     private fun createAdminBusinessMembership(business: AdminBusiness): BusinessMembership {
         val liquor = business.businessType == "counter_seller" || business.businessType == "liquor_store"
         val featureFlags = if (liquor) {
@@ -761,7 +898,16 @@ class CounterPosRepository(
             counterCount = if (liquor) 1 else business.counterCount.toInt().coerceAtLeast(1),
             featureFlags = featureFlags,
             currency = "KES",
-            lowStockThreshold = 5
+            lowStockThreshold = 5,
+            subscriptionStatus = business.subscriptionStatus,
+            trialEndsAt = business.trialEndsAt,
+            subscriptionEndsAt = business.subscriptionEndsAt,
+            subscriptionPriceKsh = business.subscriptionPriceKsh,
+            subscriptionPlanDays = business.subscriptionPlanDays,
+            lastPaymentAt = business.lastPaymentAt,
+            lastPaymentReceipt = business.lastPaymentReceipt,
+            lastPaymentPhone = business.lastPaymentPhone,
+            lastVerifiedEntitlementAt = System.currentTimeMillis()
         )
     }
 
@@ -886,6 +1032,16 @@ class CounterPosRepository(
                     .put("feature_flags", JSONArray(membership.featureFlags.toList()))
                     .put("currency", membership.currency)
                     .put("low_stock_threshold", membership.lowStockThreshold)
+                    .put("subscription_status", membership.subscriptionStatus)
+                    .put("trial_ends_at", membership.trialEndsAt ?: "")
+                    .put("subscription_ends_at", membership.subscriptionEndsAt ?: "")
+                    .put("subscription_price_ksh", membership.subscriptionPriceKsh)
+                    .put("subscription_plan_days", membership.subscriptionPlanDays)
+                    .put("last_payment_at", membership.lastPaymentAt ?: "")
+                    .put("last_payment_receipt", membership.lastPaymentReceipt ?: "")
+                    .put("last_payment_phone", membership.lastPaymentPhone ?: "")
+                    .put("last_verified_entitlement_at", membership.lastVerifiedEntitlementAt)
+                    .put("owner_phone", membership.ownerPhone ?: "")
             )
         }
         val json = JSONObject()
@@ -914,7 +1070,17 @@ class CounterPosRepository(
                         counterInventoryMode = row.optString("counter_inventory_mode", "shared"),
                         featureFlags = (0 until flags.length()).mapNotNull { flags.optString(it).takeIf(String::isNotBlank) }.toSet(),
                         currency = row.optString("currency", "KES"),
-                        lowStockThreshold = row.optInt("low_stock_threshold", 5)
+                        lowStockThreshold = row.optInt("low_stock_threshold", 5),
+                        subscriptionStatus = row.optString("subscription_status", "trial"),
+                        trialEndsAt = row.optString("trial_ends_at").takeIf(String::isNotBlank),
+                        subscriptionEndsAt = row.optString("subscription_ends_at").takeIf(String::isNotBlank),
+                        subscriptionPriceKsh = row.optInt("subscription_price_ksh", 2500).let { if (it <= 0) 2500 else it },
+                        subscriptionPlanDays = row.optInt("subscription_plan_days", 30).let { if (it <= 0) 30 else it },
+                        lastPaymentAt = row.optString("last_payment_at").takeIf(String::isNotBlank),
+                        lastPaymentReceipt = row.optString("last_payment_receipt").takeIf(String::isNotBlank),
+                        lastPaymentPhone = row.optString("last_payment_phone").takeIf(String::isNotBlank),
+                        lastVerifiedEntitlementAt = row.optLong("last_verified_entitlement_at", 0L),
+                        ownerPhone = row.optString("owner_phone").takeIf(String::isNotBlank)
                     )
                 )
             }

@@ -23,6 +23,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -36,6 +37,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.CreditCard
 import androidx.compose.material.icons.filled.Groups
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Inventory2
@@ -43,6 +45,7 @@ import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Refresh
@@ -68,6 +71,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -78,6 +82,8 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.TabRow
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -103,14 +109,36 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.alvinb.counterpos.data.remote.AdminAuditEvent
 import com.alvinb.counterpos.data.remote.AdminBusiness
+import com.alvinb.counterpos.data.remote.PlatformBillingSettings
 import com.alvinb.counterpos.ui.scanner.BarcodeScannerScreen
 import com.alvinb.counterpos.ui.scanner.ScannerMode
 
 private enum class SuperadminTab(val title: String, val icon: ImageVector) {
     PORTFOLIO("Client Portfolio", Icons.Default.Business),
     REGISTER("Register Tenant", Icons.Default.AddBusiness),
+    BILLING("Billing Settings", Icons.Default.CreditCard),
     AUDIT("Audit & Activity", Icons.Default.History)
 }
+
+private fun superadminLightColorScheme() = lightColorScheme(
+    primary = Color(0xFF0E5B53),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFE4EBE8),
+    onPrimaryContainer = Color(0xFF13211E),
+    secondaryContainer = Color(0xFFE4EBE8),
+    onSecondaryContainer = Color(0xFF13211E),
+    background = Color(0xFFEEF2F0),
+    onBackground = Color(0xFF13211E),
+    surface = Color.White,
+    onSurface = Color(0xFF13211E),
+    surfaceVariant = Color(0xFFE4EBE8),
+    onSurfaceVariant = Color(0xFF5F6F6A),
+    outline = Color(0xFFD3DDD9),
+    outlineVariant = Color(0xFFE3EBE6),
+    error = Color(0xFFB3261E),
+    errorContainer = Color(0xFFFBE0DC),
+    onErrorContainer = Color(0xFF7A271A)
+)
 
 @Composable
 fun SuperadminDashboardScreen(
@@ -133,6 +161,7 @@ fun SuperadminDashboardScreen(
     // Register Form state
     var regBusinessName by remember { mutableStateOf("") }
     var regOwnerEmail by remember { mutableStateOf("") }
+    var regOwnerPhone by remember { mutableStateOf("") }
     var regBusinessType by remember { mutableStateOf("big_club") }
     var regBusinessSize by remember { mutableStateOf("medium") }
     var regInventoryMode by remember { mutableStateOf("shared") }
@@ -140,6 +169,7 @@ fun SuperadminDashboardScreen(
 
     LaunchedEffect(Unit) {
         viewModel.loadAdminBusinesses()
+        viewModel.loadAdminPlatformBillingSettings()
         viewModel.loadAdminAuditEvents()
     }
 
@@ -170,6 +200,7 @@ fun SuperadminDashboardScreen(
                 "active" -> business.status == "active"
                 "suspended" -> business.status == "suspended"
                 "closed" -> business.status == "closed"
+                "paid", "active_unverified", "trial", "expired", "locked", "unknown" -> business.billingState().filterKey == statusFilter
                 "clubs" -> business.businessType == "big_club" || business.businessType == "club"
                 "liquor" -> business.businessType == "counter_seller" || business.businessType == "liquor_store"
                 "awaiting_owner" -> business.ownerEmail == "Pending owner enrollment"
@@ -182,132 +213,218 @@ fun SuperadminDashboardScreen(
                 business.businessType.contains(query, ignoreCase = true)
             matchesFilter && matchesQuery
         }
+            .sortedWith(
+                compareBy<AdminBusiness> { it.ownerEmail == "Pending owner enrollment" }
+                    .thenBy { it.ownerEmail.lowercase() }
+                    .thenBy { it.shopName.lowercase() }
+            )
     }
 
+    MaterialTheme(
+        colorScheme = superadminLightColorScheme()
+    ) {
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = Color(0xFFEEF2F0),
         topBar = {
-            ModernPlatformTopBar(
+            FaithfulSuperadminTopBar(
                 email = email,
                 onRefresh = {
                     viewModel.loadAdminBusinesses()
+                    viewModel.loadAdminPlatformBillingSettings()
                     viewModel.loadAdminAuditEvents()
                 },
                 onSignOut = onSignOut
             )
-        }
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-        ) {
-            // Metrics strip
-            SuperadminMetricsStrip(
-                totalCount = businesses.size,
-                liveCount = liveCount,
-                pendingOwnerCount = pendingOwnerCount,
-                clubCount = clubCount,
-                liquorCount = liquorCount,
-                onMetricClick = { filter ->
-                    statusFilter = filter
-                    selectedTab = SuperadminTab.PORTFOLIO
-                }
-            )
-
-            // Notifications & Errors
-            if (!error.isNullOrBlank()) {
-                ModernMessageBanner(message = error, isError = true, onDismiss = onClearError)
-            }
-            if (!state.notice.isNullOrBlank()) {
-                ModernMessageBanner(message = state.notice.orEmpty(), isError = false, onDismiss = onClearError)
-            }
-
-            // Tab bar
-            ModernSuperadminTabs(
+        },
+        bottomBar = {
+            FaithfulSuperadminBottomBar(
                 selectedTab = selectedTab,
-                portfolioCount = filteredBusinesses.size,
-                auditCount = state.adminAuditEvents.size,
                 onTabSelected = { selectedTab = it }
             )
+        }
+    ) { paddingValues ->
+        when (selectedTab) {
+            SuperadminTab.PORTFOLIO -> FaithfulPortfolioContent(
+                modifier = Modifier.fillMaxSize().padding(paddingValues),
+                businesses = businesses,
+                filteredBusinesses = filteredBusinesses,
+                adminEnrollmentCredential = state.adminEnrollmentCredential,
+                searchQuery = searchQuery,
+                statusFilter = statusFilter,
+                isLoading = state.isLoadingAdminBusinesses,
+                hasFreshData = state.hasFreshAdminBusinesses,
+                refreshError = state.adminBusinessesError,
+                selectedBusinessId = state.adminSelectedBusinessId,
+                onSearchChange = { searchQuery = it },
+                onStatusFilterChange = { statusFilter = it },
+                onSelectBusiness = { viewModel.selectAdminBusiness(it) },
+                onScanOwnerQr = { shopId -> viewModel.openAdminEnrollmentScanner(shopId, "owner") },
+                onCreateOwnerPasskey = { shopId -> viewModel.createAdminEnrollmentPass(shopId, "owner") },
+                onOpenSubscription = { viewModel.adminOpenSubscriptionDialog(it) },
+                onStatusChange = { shopId, status, fallback ->
+                    viewModel.setBusinessStatus(shopId, status, lifecycleReason.trim().ifBlank { fallback })
+                },
+                onNavigateToRegister = { selectedTab = SuperadminTab.REGISTER },
+                error = error,
+                notice = state.notice,
+                onClearMessage = onClearError
+            )
+            SuperadminTab.REGISTER -> RegisterTenantContent(
+                businessName = regBusinessName,
+                ownerEmail = regOwnerEmail,
+                ownerPhone = regOwnerPhone,
+                businessType = regBusinessType,
+                businessSize = regBusinessSize,
+                inventoryMode = regInventoryMode,
+                counterCount = regCounterCount,
+                isCreating = state.isCreatingAdminBusiness,
+                onBusinessNameChange = { regBusinessName = it; onClearError() },
+                onOwnerEmailChange = { regOwnerEmail = it; onClearError() },
+                onOwnerPhoneChange = { regOwnerPhone = it; onClearError() },
+                onBusinessTypeChange = { regBusinessType = it },
+                onBusinessSizeChange = { regBusinessSize = it },
+                onInventoryModeChange = { regInventoryMode = it },
+                onCounterCountChange = { regCounterCount = it.filter(Char::isDigit).take(2) },
+                onCreate = { viewModel.createBusinessForOwner(regBusinessName, regOwnerEmail, regOwnerPhone, regBusinessType, regBusinessSize, regInventoryMode, regCounterCount.toIntOrNull() ?: 1, onCreated = { selectedTab = SuperadminTab.PORTFOLIO }) }
+            )
+            SuperadminTab.BILLING -> PlatformBillingSettingsContent(
+                modifier = Modifier.fillMaxSize().padding(paddingValues),
+                settings = state.platformBillingSettings,
+                isLoading = state.isLoadingPlatformBillingSettings,
+                isSaving = state.isSavingPlatformBillingSettings,
+                error = error,
+                notice = state.notice,
+                onRefresh = { viewModel.loadAdminPlatformBillingSettings() },
+                onSave = { days, price -> viewModel.adminUpdatePlatformBillingSettings(days, price) },
+                onClearMessage = onClearError
+            )
+            SuperadminTab.AUDIT -> AuditTrailContent(
+                auditEvents = state.adminAuditEvents,
+                isLoading = state.isLoadingAuditEvents,
+                onRefresh = { viewModel.loadAdminAuditEvents() }
+            )
+        }
+    }
 
-            // Tab contents
-            when (selectedTab) {
-                SuperadminTab.PORTFOLIO -> {
-                    PortfolioContent(
-                        businesses = businesses,
-                        filteredBusinesses = filteredBusinesses,
-                        selectedBusinessId = state.adminSelectedBusinessId,
-                        adminEnrollmentCredential = state.adminEnrollmentCredential,
-                        searchQuery = searchQuery,
-                        statusFilter = statusFilter,
-                        showStatusReasonField = showStatusReasonField,
-                        lifecycleReason = lifecycleReason,
-                        onSearchChange = { searchQuery = it },
-                        onStatusFilterChange = { statusFilter = it },
-                        onToggleReasonField = { showStatusReasonField = !showStatusReasonField },
-                        onLifecycleReasonChange = { lifecycleReason = it },
-                        onSelectBusiness = { viewModel.selectAdminBusiness(it) },
-                        onScanOwnerQr = { shopId, role -> viewModel.openAdminEnrollmentScanner(shopId, role) },
-                        onCreateOwnerPasskey = { shopId, role -> viewModel.createAdminEnrollmentPass(shopId, role) },
-                        onClearPasskey = viewModel::clearAdminEnrollmentCredential,
-                        onStatusChange = { shopId, status, fallback ->
-                            val reason = lifecycleReason.trim().ifBlank { fallback }
-                            viewModel.setBusinessStatus(shopId, status, reason)
-                        },
-                        onNavigateToRegister = { selectedTab = SuperadminTab.REGISTER }
+    val selectedSubBusiness = state.adminSelectedSubscriptionBusiness
+    if (selectedSubBusiness != null) {
+        MaterialTheme(colorScheme = superadminLightColorScheme()) {
+            AdminSubscriptionDialog(
+                business = selectedSubBusiness,
+                isUpdating = state.isUpdatingSubscription,
+                onDismiss = viewModel::adminCloseSubscriptionDialog,
+                onSave = { price, endsAt, status, planDays, trialEndsAt, note ->
+                    viewModel.adminUpdateShopSubscription(
+                        shopId = selectedSubBusiness.shopId,
+                        priceKsh = price,
+                        endsAtIso = endsAt,
+                        status = status,
+                        planDays = planDays,
+                        trialEndsAtIso = trialEndsAt,
+                        note = note
                     )
+                },
+                onExtendTrial = { viewModel.adminExtendTrial(selectedSubBusiness.shopId, 14) },
+                onActivatePaid = { days -> viewModel.adminActivatePaidTerm(selectedSubBusiness.shopId, days) },
+                onSetPaymentLock = { locked, amount, reason ->
+                    viewModel.adminSetPaymentLock(selectedSubBusiness.shopId, locked, amount, reason)
                 }
+            )
+        }
+    }
+}
 
-                SuperadminTab.REGISTER -> {
-                    RegisterTenantContent(
-                        businessName = regBusinessName,
-                        ownerEmail = regOwnerEmail,
-                        businessType = regBusinessType,
-                        businessSize = regBusinessSize,
-                        inventoryMode = regInventoryMode,
-                        counterCount = regCounterCount,
-                        isCreating = state.isCreatingAdminBusiness,
-                        onBusinessNameChange = { regBusinessName = it; onClearError() },
-                        onOwnerEmailChange = { regOwnerEmail = it; onClearError() },
-                        onBusinessTypeChange = { type ->
-                            regBusinessType = type
-                            if (type == "counter_seller") {
-                                regBusinessSize = "medium"
-                                regInventoryMode = "shared"
-                                regCounterCount = "1"
-                            }
-                        },
-                        onBusinessSizeChange = { regBusinessSize = it },
-                        onInventoryModeChange = { regInventoryMode = it },
-                        onCounterCountChange = { regCounterCount = it.filter(Char::isDigit).take(2) },
-                        onCreate = {
-                            viewModel.createBusinessForOwner(
-                                name = regBusinessName,
-                                ownerEmail = regOwnerEmail,
-                                businessType = regBusinessType,
-                                businessSize = regBusinessSize,
-                                inventoryMode = regInventoryMode,
-                                counterCount = if (regBusinessType == "big_club") regCounterCount.toIntOrNull() ?: 1 else 1,
-                                onCreated = {
-                                    regBusinessName = ""
-                                    regOwnerEmail = ""
-                                    regCounterCount = "1"
-                                    selectedTab = SuperadminTab.PORTFOLIO
-                                }
-                            )
-                        }
-                    )
+}
+
+
+@Composable
+private fun PlatformBillingSettingsContent(
+    modifier: Modifier,
+    settings: PlatformBillingSettings?,
+    isLoading: Boolean,
+    isSaving: Boolean,
+    error: String?,
+    notice: String?,
+    onRefresh: () -> Unit,
+    onSave: (trialDurationDays: Int, subscriptionPriceKsh: Int) -> Unit,
+    onClearMessage: () -> Unit
+) {
+    var trialDurationText by remember(settings?.trialDurationDays) {
+        mutableStateOf(settings?.trialDurationDays?.toString() ?: "14")
+    }
+    var priceText by remember(settings?.subscriptionPriceKsh) {
+        mutableStateOf(settings?.subscriptionPriceKsh?.toString() ?: "2500")
+    }
+    val trialDuration = trialDurationText.toIntOrNull()
+    val price = priceText.toIntOrNull()
+    val valid = settings != null && trialDuration != null && trialDuration in 0..365 &&
+        price != null && price in 1..250000
+
+    Column(
+        modifier = modifier.verticalScroll(rememberScrollState()).padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Platform billing", fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF13211E))
+                Text("Default trial and shared renewal price", fontSize = 13.sp, color = Color(0xFF5F6F6A))
+            }
+            IconButton(onClick = onRefresh, enabled = !isLoading) {
+                Icon(Icons.Default.Refresh, contentDescription = "Refresh billing settings")
+            }
+        }
+
+        Card(colors = CardDefaults.cardColors(containerColor = Color.White)) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                if (isLoading) {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
                 }
-
-                SuperadminTab.AUDIT -> {
-                    AuditTrailContent(
-                        auditEvents = state.adminAuditEvents,
-                        isLoading = state.isLoadingAuditEvents,
-                        onRefresh = { viewModel.loadAdminAuditEvents() }
-                    )
+                OutlinedTextField(
+                    value = trialDurationText,
+                    onValueChange = { trialDurationText = it.filter(Char::isDigit).take(3) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Free trial duration (days)") },
+                    supportingText = { Text("0 disables trials for newly created businesses; maximum 365 days.") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true
+                )
+                OutlinedTextField(
+                    value = priceText,
+                    onValueChange = { priceText = it.filter(Char::isDigit).take(6) },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Standard subscription price (KSh)") },
+                    supportingText = { Text("Updates every business's next payment price; KSh 1–250,000.") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    singleLine = true
+                )
+                Text(
+                    "Existing trial end dates and already-paid terms are preserved. A price change does not charge or lock an active business early; the new amount is due at its next renewal.",
+                    fontSize = 12.sp,
+                    color = Color(0xFF5F6F6A)
+                )
+                Button(
+                    onClick = { if (valid) onSave(trialDuration!!, price!!) },
+                    enabled = valid && !isLoading && !isSaving,
+                    modifier = Modifier.fillMaxWidth().height(48.dp)
+                ) {
+                    if (isSaving) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(if (isSaving) "Saving…" else "Save global billing settings")
                 }
             }
+        }
+        if (!error.isNullOrBlank()) {
+            TextButton(onClick = onClearMessage) {
+                Text(error, color = MaterialTheme.colorScheme.error)
+            }
+        }
+        if (!notice.isNullOrBlank()) {
+            Text(notice, color = Color(0xFF0E5B53), fontSize = 13.sp)
         }
     }
 }
@@ -577,6 +694,9 @@ private fun PortfolioContent(
     onCreateOwnerPasskey: (String, String) -> Unit,
     onClearPasskey: () -> Unit,
     onStatusChange: (String, String, String?) -> Unit,
+    onOpenSubscription: (AdminBusiness) -> Unit,
+    onExtendTrial: (String) -> Unit,
+    onActivatePaid: (String, Int) -> Unit,
     onNavigateToRegister: () -> Unit
 ) {
     LazyColumn(
@@ -584,6 +704,47 @@ private fun PortfolioContent(
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        item {
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.18f))
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
+                        Icon(
+                            imageVector = Icons.Default.Person,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimary,
+                            modifier = Modifier.padding(10.dp).size(24.dp)
+                        )
+                    }
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Owner directory", fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            "Manage each business owner, enrollment status, billing, and access from one place.",
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            businesses.count { it.ownerEmail != "Pending owner enrollment" }.toString(),
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text("owners", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
         // Search & Filter header
         item {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -699,7 +860,10 @@ private fun PortfolioContent(
                     onScanOwnerQr = { role -> onScanOwnerQr(business.shopId, role) },
                     onCreateOwnerPasskey = { role -> onCreateOwnerPasskey(business.shopId, role) },
                     onClearPasskey = onClearPasskey,
-                    onStatusChange = onStatusChange
+                    onStatusChange = onStatusChange,
+                    onOpenSubscription = onOpenSubscription,
+                    onExtendTrial = onExtendTrial,
+                    onActivatePaid = onActivatePaid
                 )
             }
         }
@@ -715,7 +879,10 @@ private fun ModernBusinessCard(
     onScanOwnerQr: (String) -> Unit,
     onCreateOwnerPasskey: (String) -> Unit,
     onClearPasskey: () -> Unit,
-    onStatusChange: (String, String, String?) -> Unit
+    onStatusChange: (String, String, String?) -> Unit,
+    onOpenSubscription: (AdminBusiness) -> Unit,
+    onExtendTrial: (String) -> Unit,
+    onActivatePaid: (String, Int) -> Unit
 ) {
     val clipboardManager = LocalClipboardManager.current
     var enrollmentRole by remember(business.shopId) { mutableStateOf("owner") }
@@ -792,68 +959,66 @@ private fun ModernBusinessCard(
                     }
                 }
 
-                StatusBadge(status = business.status)
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    StatusBadge(status = business.status)
+                    SubscriptionStatusBadge(business = business)
+                }
             }
 
-            // Owner banner / status indicator
-            if (isAwaitingOwner) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.3f))
+            // Owner directory block: identity, enrollment state, and account age are kept together.
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = if (isAwaitingOwner) MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.55f)
+                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                border = BorderStroke(
+                    1.dp,
+                    if (isAwaitingOwner) MaterialTheme.colorScheme.error.copy(alpha = 0.28f)
+                    else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)
+                )
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 7.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Surface(
+                        shape = CircleShape,
+                        color = if (isAwaitingOwner) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primaryContainer
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Key,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.error,
-                            modifier = Modifier.size(16.dp)
-                        )
                         Text(
-                            text = "Owner enrollment pending — scan owner QR or generate passkey below",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.weight(1f)
+                            text = if (isAwaitingOwner) "!" else business.ownerEmail.trim().firstOrNull()?.toString()?.uppercase() ?: "O",
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 9.dp),
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (isAwaitingOwner) MaterialTheme.colorScheme.onError else MaterialTheme.colorScheme.onPrimaryContainer
                         )
                     }
-                }
-            } else {
-                Surface(
-                    shape = RoundedCornerShape(10.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text("Business owner", fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         Text(
-                            text = "Owner:",
-                            fontSize = 11.sp,
+                            text = if (isAwaitingOwner) "Owner enrollment pending" else business.ownerEmail.ifBlank { "Not configured" },
+                            fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = business.ownerEmail.ifBlank { "Not configured" },
-                            fontSize = 11.sp,
                             color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.weight(1f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = "Created ${business.createdAt.take(10)}",
+                            text = if (isAwaitingOwner) "Scan QR or issue a passkey to activate access"
+                            else "Tenant since ${business.createdAt.take(10)}",
                             fontSize = 10.sp,
-                            color = MaterialTheme.colorScheme.outline
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = if (isAwaitingOwner) MaterialTheme.colorScheme.error.copy(alpha = 0.14f) else Color(0xFF00A349).copy(alpha = 0.12f)
+                    ) {
+                        Text(
+                            text = if (isAwaitingOwner) "ACTION NEEDED" else "CONNECTED",
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp),
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            color = if (isAwaitingOwner) MaterialTheme.colorScheme.error else Color(0xFF007A34)
                         )
                     }
                 }
@@ -1125,6 +1290,97 @@ private fun ModernBusinessCard(
                         }
                     }
 
+                    // SaaS Subscription & Daraja Billing Management
+                    Surface(
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.CreditCard,
+                                        contentDescription = null,
+                                        tint = Color(0xFF00A349),
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                    Text(
+                                        text = "SaaS Subscription & Daraja",
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 13.sp,
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Text(
+                                    text = "KSh ${business.subscriptionPriceKsh}",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = Color(0xFF00A349)
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = "Status: ${business.subscriptionStatus.uppercase()}",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = if (!business.subscriptionEndsAt.isNullOrBlank()) "Paid until: ${business.subscriptionEndsAt.take(10)}"
+                                    else if (!business.trialEndsAt.isNullOrBlank()) "Trial until: ${business.trialEndsAt.take(10)}"
+                                    else "Expired",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+
+                            if (!business.customBillingNote.isNullOrBlank()) {
+                                Text(
+                                    text = "Billing note: ${business.customBillingNote}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { onExtendTrial(business.shopId) },
+                                    modifier = Modifier.weight(1f),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("+14d Trial", fontSize = 11.sp)
+                                }
+                                Button(
+                                    onClick = { onOpenSubscription(business) },
+                                    modifier = Modifier.weight(1.3f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00A349)),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Text("Manage Billing", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                        }
+                    }
+
                     // Status Lifecycle controls
                     Surface(
                         shape = RoundedCornerShape(14.dp),
@@ -1296,6 +1552,7 @@ private fun StatusBadge(status: String) {
 private fun RegisterTenantContent(
     businessName: String,
     ownerEmail: String,
+    ownerPhone: String,
     businessType: String,
     businessSize: String,
     inventoryMode: String,
@@ -1303,6 +1560,7 @@ private fun RegisterTenantContent(
     isCreating: Boolean,
     onBusinessNameChange: (String) -> Unit,
     onOwnerEmailChange: (String) -> Unit,
+    onOwnerPhoneChange: (String) -> Unit,
     onBusinessTypeChange: (String) -> Unit,
     onBusinessSizeChange: (String) -> Unit,
     onInventoryModeChange: (String) -> Unit,
@@ -1312,8 +1570,9 @@ private fun RegisterTenantContent(
     val isClub = businessType == "big_club" || businessType == "club"
     val isLiquorStore = businessType == "counter_seller" || businessType == "liquor_store"
     val ownerEmailValid = ownerEmail.isBlank() || (ownerEmail.trim().contains("@") && ownerEmail.none(Char::isWhitespace))
+    val ownerPhoneValid = com.alvinb.counterpos.data.SubscriptionManager.normalizeKenyanPhone(ownerPhone) != null
     val counterCountValid = !isClub || (counterCount.toIntOrNull()?.let { it in 1..50 } == true)
-    val canSubmit = businessName.trim().length in 2..120 && ownerEmailValid && counterCountValid && !isCreating
+    val canSubmit = businessName.trim().length in 2..120 && ownerEmailValid && ownerPhoneValid && counterCountValid && !isCreating
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -1411,6 +1670,22 @@ private fun RegisterTenantContent(
                         },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
                         singleLine = true,
+                        shape = RoundedCornerShape(14.dp)
+                    )
+                    OutlinedTextField(
+                        value = ownerPhone,
+                        onValueChange = onOwnerPhoneChange,
+                        modifier = Modifier.fillMaxWidth().testTag("input_register_owner_phone"),
+                        label = { Text("Owner Mobile Number") },
+                        placeholder = { Text("0712 345 678") },
+                        isError = ownerPhone.isNotBlank() && !ownerPhoneValid,
+                        supportingText = {
+                            if (ownerPhone.isNotBlank() && !ownerPhoneValid) Text("Enter a valid Kenyan mobile number.")
+                            else Text("Used to prefill M-Pesa subscription payments.")
+                        },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                        singleLine = true,
+                        enabled = !isCreating,
                         shape = RoundedCornerShape(14.dp)
                     )
                 }
@@ -1991,4 +2266,734 @@ private fun ModernEmptyPortfolioState(
             }
         }
     }
+}
+
+@Composable
+private fun SubscriptionStatusBadge(business: AdminBusiness) {
+    val subStatus = business.subscriptionStatus.lowercase()
+    val subColor = when (subStatus) {
+        "active" -> Color(0xFF00A349)
+        "trial" -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.error
+    }
+    Surface(
+        shape = RoundedCornerShape(8.dp),
+        color = subColor.copy(alpha = 0.12f),
+        border = BorderStroke(1.dp, subColor.copy(alpha = 0.35f))
+    ) {
+        Text(
+            text = "SaaS: ${subStatus.uppercase()}",
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+            fontSize = 9.sp,
+            fontWeight = FontWeight.Bold,
+            color = subColor
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AdminSubscriptionDialog(
+    business: AdminBusiness,
+    isUpdating: Boolean,
+    onDismiss: () -> Unit,
+    onSave: (price: Int?, endsAt: String?, status: String?, planDays: Int?, trialEndsAt: String?, note: String?) -> Unit,
+    onExtendTrial: () -> Unit,
+    onActivatePaid: (days: Int) -> Unit,
+    onSetPaymentLock: (locked: Boolean, amountKsh: Int?, reason: String?) -> Unit
+) {
+    var priceText by remember(business.subscriptionPriceKsh) {
+        mutableStateOf(business.subscriptionPriceKsh.toString())
+    }
+    var planDaysText by remember(business.subscriptionPlanDays) {
+        mutableStateOf(business.subscriptionPlanDays.toString())
+    }
+    var selectedStatus by remember(business.subscriptionStatus) {
+        mutableStateOf(business.subscriptionStatus)
+    }
+    var noteText by remember(business.customBillingNote) {
+        mutableStateOf(business.customBillingNote.orEmpty())
+    }
+    var customEndsAt by remember(business.subscriptionEndsAt) {
+        mutableStateOf(business.subscriptionEndsAt.orEmpty())
+    }
+    var lockAmountText by remember(business.paymentLockAmountKsh, business.subscriptionPriceKsh) {
+        mutableStateOf((if (business.paymentLockAmountKsh > 0) business.paymentLockAmountKsh else business.subscriptionPriceKsh).toString())
+    }
+    var lockReasonText by remember(business.paymentLockReason) { mutableStateOf(business.paymentLockReason.orEmpty()) }
+
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+                // Header
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Manage Subscription",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 18.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = business.shopName,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    IconButton(onClick = onDismiss) {
+                        Icon(Icons.Default.Close, contentDescription = "Close")
+                    }
+                }
+
+                HorizontalDivider()
+
+                // Quick Action Buttons
+                Text(
+                    text = "Quick Entitlement Extensions:",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onExtendTrial,
+                        enabled = !isUpdating,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("+14d Trial", fontSize = 11.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = { onActivatePaid(30) },
+                        enabled = !isUpdating,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("+30d Paid", fontSize = 11.sp)
+                    }
+
+                    OutlinedButton(
+                        onClick = { onActivatePaid(90) },
+                        enabled = !isUpdating,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("+90d Paid", fontSize = 11.sp)
+                    }
+                }
+
+                HorizontalDivider()
+
+                Text(
+                    text = "Platform Payment Lock",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = if (business.paymentLockActive) "This business is currently locked on every owner and employee device."
+                    else "Lock all POS functions and require the owner to pay a specific amount.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                if (!business.paymentLockActive) {
+                    OutlinedTextField(
+                        value = lockAmountText,
+                        onValueChange = { lockAmountText = it.filter(Char::isDigit) },
+                        label = { Text("Amount due (KES)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = lockReasonText,
+                        onValueChange = { lockReasonText = it.take(240) },
+                        label = { Text("Reason / instruction (optional)") },
+                        modifier = Modifier.fillMaxWidth(),
+                        minLines = 2
+                    )
+                    Button(
+                        onClick = {
+                            onSetPaymentLock(true, lockAmountText.toIntOrNull(), lockReasonText.trim().ifBlank { null })
+                        },
+                        enabled = !isUpdating && (lockAmountText.toIntOrNull() ?: 0) > 0,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) { Text("Start Payment Lock") }
+                } else {
+                    Button(
+                        onClick = { onSetPaymentLock(false, null, null) },
+                        enabled = !isUpdating,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00A349))
+                    ) { Text("Clear Payment Lock") }
+                }
+
+                HorizontalDivider()
+
+                // Custom Price (KSh)
+                OutlinedTextField(
+                    value = priceText,
+                    onValueChange = { priceText = it.filter(Char::isDigit) },
+                    label = { Text("Renewal Price (KES)") },
+                    placeholder = { Text("2500") },
+                    leadingIcon = {
+                        Text("KSh", fontWeight = FontWeight.Bold, fontSize = 12.sp, modifier = Modifier.padding(start = 12.dp))
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+
+                // Plan Duration (Days)
+                OutlinedTextField(
+                    value = planDaysText,
+                    onValueChange = { planDaysText = it.filter(Char::isDigit) },
+                    label = { Text("Plan Duration (Days)") },
+                    placeholder = { Text("30") },
+                    modifier = Modifier.fillMaxWidth(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+
+                // Status Selector (trial, active, expired)
+                Column {
+                    Text(
+                        text = "Subscription Status:",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf("trial", "active", "expired").forEach { st ->
+                            FilterChip(
+                                selected = selectedStatus == st,
+                                onClick = { selectedStatus = st },
+                                label = { Text(st.replaceFirstChar { it.uppercase() }) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
+
+                // Custom End Date (ISO string or timestamp)
+                OutlinedTextField(
+                    value = customEndsAt,
+                    onValueChange = { customEndsAt = it },
+                    label = { Text("Subscription Expiry (ISO UTC or Blank)") },
+                    placeholder = { Text("2026-12-31T23:59:59Z") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+
+                // Custom Billing Note
+                OutlinedTextField(
+                    value = noteText,
+                    onValueChange = { noteText = it },
+                    label = { Text("Billing Notes / Arrangement") },
+                    placeholder = { Text("e.g. Special merchant partner rate") },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(12.dp),
+                    singleLine = true
+                )
+
+                // Last Payment History Info if present
+                if (!business.lastPaymentReceipt.isNullOrBlank() || !business.lastPaymentAt.isNullOrBlank()) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                text = "Last Recorded Payment:",
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "Receipt: ${business.lastPaymentReceipt ?: "N/A"}",
+                                fontSize = 11.sp
+                            )
+                            Text(
+                                text = "Phone: ${business.lastPaymentPhone ?: "N/A"}",
+                                fontSize = 11.sp
+                            )
+                            if (!business.lastPaymentAt.isNullOrBlank()) {
+                                Text(
+                                    text = "Date: ${business.lastPaymentAt.take(19).replace('T', ' ')}",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.outline
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(4.dp))
+
+                // Action Buttons
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Cancel")
+                    }
+
+                    Button(
+                        onClick = {
+                            val priceInt = priceText.toIntOrNull()
+                            val daysInt = planDaysText.toIntOrNull()
+                            val endsIso = customEndsAt.trim().takeIf(String::isNotBlank)
+                            val note = noteText.trim().takeIf(String::isNotBlank)
+                            onSave(priceInt, endsIso, selectedStatus, daysInt, null, note)
+                        },
+                        enabled = !isUpdating,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        if (isUpdating) {
+                            CircularProgressIndicator(
+                                color = Color.White,
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp
+                            )
+                        } else {
+                            Text("Save", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+
+@Composable
+private fun FaithfulSuperadminTopBar(
+    email: String,
+    onRefresh: () -> Unit,
+    onSignOut: () -> Unit
+) {
+    Surface(color = Color(0xFFEEF2F0)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Counter POS", fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, color = Color(0xFF13211E))
+                Text(email, fontSize = 11.sp, color = Color(0xFF5F6F6A), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            IconButton(onClick = onRefresh) { Icon(Icons.Default.Refresh, contentDescription = "Refresh") }
+            IconButton(onClick = onSignOut) { Icon(Icons.AutoMirrored.Filled.Logout, contentDescription = "Sign out") }
+        }
+    }
+}
+
+@Composable
+private fun FaithfulSuperadminBottomBar(
+    selectedTab: SuperadminTab,
+    onTabSelected: (SuperadminTab) -> Unit
+) {
+    Surface(color = Color(0xFFFFFFFF), shadowElevation = 6.dp) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            SuperadminTab.entries.forEach { tab ->
+                val selected = selectedTab == tab
+                TextButton(onClick = { onTabSelected(tab) }, modifier = Modifier.weight(1f)) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(tab.icon, contentDescription = null, tint = if (selected) Color(0xFF0E5B53) else Color(0xFF5F6F6A), modifier = Modifier.size(18.dp))
+                        Text(tab.title.substringBefore(' '), fontSize = 10.sp, color = if (selected) Color(0xFF0E5B53) else Color(0xFF5F6F6A), fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FaithfulPortfolioContent(
+    modifier: Modifier,
+    businesses: List<AdminBusiness>,
+    filteredBusinesses: List<AdminBusiness>,
+    adminEnrollmentCredential: AdminEnrollmentCredential?,
+    searchQuery: String,
+    statusFilter: String,
+    isLoading: Boolean,
+    hasFreshData: Boolean,
+    refreshError: String?,
+    selectedBusinessId: String?,
+    onSearchChange: (String) -> Unit,
+    onStatusFilterChange: (String) -> Unit,
+    onSelectBusiness: (String) -> Unit,
+    onScanOwnerQr: (String) -> Unit,
+    onCreateOwnerPasskey: (String) -> Unit,
+    onOpenSubscription: (AdminBusiness) -> Unit,
+    onStatusChange: (String, String, String?) -> Unit,
+    onNavigateToRegister: () -> Unit,
+    error: String?,
+    notice: String?,
+    onClearMessage: () -> Unit
+) {
+    val needsAttention = businesses.filter {
+        it.billingState() in setOf(AdminBillingState.LOCKED, AdminBillingState.EXPIRED) ||
+            it.ownerEmail == "Pending owner enrollment" ||
+            it.status.equals("suspended", ignoreCase = true)
+    }
+    val statusMix = listOf(
+        AdminBillingState.PAID to businesses.count { it.billingState() == AdminBillingState.PAID },
+        AdminBillingState.ACTIVE_UNVERIFIED to businesses.count { it.billingState() == AdminBillingState.ACTIVE_UNVERIFIED },
+        AdminBillingState.TRIAL to businesses.count { it.billingState() == AdminBillingState.TRIAL },
+        AdminBillingState.EXPIRED to businesses.count { it.billingState() == AdminBillingState.EXPIRED },
+        AdminBillingState.LOCKED to businesses.count { it.billingState() == AdminBillingState.LOCKED },
+        AdminBillingState.UNKNOWN to businesses.count { it.billingState() == AdminBillingState.UNKNOWN }
+    )
+    val filters = listOf(
+        "all" to "All",
+        "awaiting_owner" to "Needs owner",
+        "paid" to "Paid",
+        "active_unverified" to "Active · no receipt",
+        "trial" to "Trial",
+        "expired" to "Expired",
+        "locked" to "Locked",
+        "suspended" to "Suspended",
+        "unknown" to "Unknown",
+        "clubs" to "Bars",
+        "liquor" to "Liquor stores"
+    )
+    LazyColumn(
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item {
+            Surface(
+                color = Color(0xFF0E5B53),
+                contentColor = Color.White,
+                shape = RoundedCornerShape(20.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Business portfolio", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(alpha = .82f))
+                            Row(verticalAlignment = Alignment.Bottom) {
+                                Text(businesses.size.toString(), fontSize = 38.sp, fontWeight = FontWeight.ExtraBold)
+                                Text(" businesses", fontSize = 13.sp, modifier = Modifier.padding(start = 6.dp, bottom = 5.dp), color = Color.White.copy(alpha = .85f))
+                            }
+                        }
+                        if (isLoading) CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp, color = Color.White)
+                    }
+                    Text(
+                        text = when {
+                            isLoading -> "Refreshing subscription and access records…"
+                            !refreshError.isNullOrBlank() -> "Saved snapshot · live refresh failed"
+                            hasFreshData -> "Subscription and access records refreshed from the server"
+                            businesses.isNotEmpty() -> "Saved snapshot · waiting for a live refresh"
+                            else -> "Waiting for business records"
+                        },
+                        fontSize = 11.sp,
+                        color = Color.White.copy(alpha = .86f),
+                        modifier = Modifier.padding(top = 4.dp)
+                    )
+                    if (!refreshError.isNullOrBlank()) {
+                        Text("Refresh error: $refreshError", fontSize = 10.sp, color = Color(0xFFFFD7CE), modifier = Modifier.padding(top = 4.dp))
+                    }
+                }
+            }
+        }
+        item {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                statusMix.forEach { (state, count) ->
+                    AdminPortfolioMetric(
+                        label = state.label,
+                        count = count,
+                        selected = statusFilter == state.filterKey,
+                        onClick = { onStatusFilterChange(state.filterKey) }
+                    )
+                }
+                AdminPortfolioMetric(
+                    label = "Suspended",
+                    count = businesses.count { it.status.equals("suspended", ignoreCase = true) },
+                    selected = statusFilter == "suspended",
+                    onClick = { onStatusFilterChange("suspended") }
+                )
+            }
+        }
+        if (!refreshError.isNullOrBlank()) {
+            item {
+                Surface(color = Color(0xFFFFF1D6), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        "Showing the last saved snapshot because the server refresh failed. Check the connection and refresh before using billing data.",
+                        fontSize = 11.sp,
+                        color = Color(0xFF795500),
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+        }
+        if (!error.isNullOrBlank()) item { FaithfulNotice(error, true, onClearMessage) }
+        if (!notice.isNullOrBlank()) item { FaithfulNotice(notice, false, onClearMessage) }
+        adminEnrollmentCredential?.let { credential ->
+            item {
+                val clipboardManager = LocalClipboardManager.current
+                Surface(color = Color(0xFFE0E7FB), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Owner passkey", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                            TextButton(onClick = { clipboardManager.setText(AnnotatedString(credential.passkey)) }) { Text("Copy", fontSize = 11.sp) }
+                        }
+                        Text(credential.passkey, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 1.sp)
+                        Text("One-time ${credential.role.replace('_', ' ')} credential · expires in ${credential.expiresInHours} hours", fontSize = 11.sp, color = Color(0xFF3B5BB5))
+                    }
+                }
+            }
+        }
+        if (needsAttention.isNotEmpty()) {
+            item { Text("Needs you · ${needsAttention.size}", fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF13211E), modifier = Modifier.padding(top = 12.dp, bottom = 2.dp)) }
+            items(needsAttention.take(4), key = { "need_${it.shopId}" }) { business ->
+                FaithfulNeedRow(business, onOpenSubscription, onScanOwnerQr)
+            }
+        }
+        item { Text("All businesses", fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 12.dp, bottom = 1.dp)) }
+        item {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchChange,
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+                placeholder = { Text("Search name or owner", fontSize = 13.sp) },
+                leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                shape = RoundedCornerShape(12.dp)
+            )
+        }
+        item {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                filters.forEach { (key, label) ->
+                    FilterChip(
+                        selected = statusFilter == key,
+                        onClick = { onStatusFilterChange(key) },
+                        label = { Text("$label ${filterCount(businesses, key)}", fontSize = 11.sp, maxLines = 1) },
+                        modifier = Modifier.padding(vertical = 3.dp)
+                    )
+                }
+            }
+        }
+        item { Text("${filteredBusinesses.size} businesses shown", color = Color(0xFF5F6F6A), fontSize = 11.sp, modifier = Modifier.padding(vertical = 3.dp)) }
+        if (filteredBusinesses.isEmpty()) {
+            item { Text("No businesses match. Clear the search or choose another filter.", color = Color(0xFF5F6F6A), textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().padding(24.dp)) }
+        } else {
+            items(filteredBusinesses, key = { it.shopId }) { business ->
+                FaithfulBusinessRow(
+                    business = business,
+                    isOpen = selectedBusinessId == business.shopId,
+                    onOpen = { onSelectBusiness(business.shopId) },
+                    onScanOwnerQr = { onScanOwnerQr(business.shopId) },
+                    onCreateOwnerPasskey = { onCreateOwnerPasskey(business.shopId) },
+                    onOpenSubscription = { onOpenSubscription(business) },
+                    onStatusChange = { status -> onStatusChange(business.shopId, status, "Status changed from superadmin dashboard") }
+                )
+            }
+        }
+        item { OutlinedButton(onClick = onNavigateToRegister, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.AddBusiness, contentDescription = null); Spacer(Modifier.width(6.dp)); Text("Register new business") } }
+    }
+}
+
+private fun filterCount(businesses: List<AdminBusiness>, key: String): Int = businesses.count {
+    when (key) {
+        "all" -> true
+        "awaiting_owner" -> it.ownerEmail == "Pending owner enrollment"
+        "paid", "active_unverified", "trial", "expired", "locked", "unknown" -> it.billingState().filterKey == key
+        "clubs" -> it.businessType == "big_club" || it.businessType == "club"
+        "liquor" -> it.businessType == "counter_seller" || it.businessType == "liquor_store"
+        "suspended" -> it.status.equals("suspended", ignoreCase = true)
+        else -> true
+    }
+}
+
+@Composable
+private fun AdminPortfolioMetric(
+    label: String,
+    count: Int,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    val color = when (label) {
+        "Paid" -> Color(0xFF17803F)
+        "Trial" -> Color(0xFF3B5BB5)
+        "Expired" -> Color(0xFFB3261E)
+        "Payment locked" -> Color(0xFF9A4B00)
+        "Suspended" -> Color(0xFF6D4C41)
+        else -> Color(0xFF5F6F6A)
+    }
+    Surface(
+        modifier = Modifier.clickable(onClick = onClick),
+        color = if (selected) color.copy(alpha = 0.14f) else Color.White,
+        shape = RoundedCornerShape(12.dp),
+        border = BorderStroke(1.dp, if (selected) color.copy(alpha = 0.55f) else Color(0xFFD3DDD9))
+    ) {
+        Column(Modifier.padding(horizontal = 12.dp, vertical = 9.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(count.toString(), fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, color = color)
+            Text(label, fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF5F6F6A), maxLines = 1)
+        }
+    }
+}
+
+@Composable
+private fun FaithfulNotice(message: String, isError: Boolean, onDismiss: () -> Unit) {
+    Surface(color = if (isError) Color(0xFFFBE0DC) else Color(0xFFE0E7FB), shape = RoundedCornerShape(12.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(message, fontSize = 11.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = onDismiss) { Text("×") }
+        }
+    }
+}
+
+@Composable
+private fun FaithfulNeedRow(business: AdminBusiness, onOpenSubscription: (AdminBusiness) -> Unit, onScanOwnerQr: (String) -> Unit) {
+    val billingState = business.billingState()
+    val isLocked = billingState == AdminBillingState.LOCKED
+    val reason = when {
+        isLocked -> "Payment locked · ${business.paymentLockReason ?: "Payment required"}"
+        business.ownerEmail == "Pending owner enrollment" -> "Owner hasn’t signed in yet"
+        business.status.equals("suspended", ignoreCase = true) -> "Business access is suspended"
+        billingState == AdminBillingState.EXPIRED -> business.billingExpiryLabel()
+        else -> "Review business access"
+    }
+    Surface(color = Color.White, shape = RoundedCornerShape(12.dp), border = BorderStroke(1.dp, Color(0xFFD3DDD9)), modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(business.shopName, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text(reason, fontSize = 11.sp, color = Color(0xFF5F6F6A), maxLines = 2)
+            }
+            Button(onClick = { if (isLocked) onOpenSubscription(business) else onScanOwnerQr(business.shopId) }, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 7.dp), shape = RoundedCornerShape(10.dp)) {
+                Text(if (isLocked) "Review" else if (business.ownerEmail == "Pending owner enrollment") "Enroll" else "Renew", fontSize = 11.sp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun FaithfulBusinessRow(
+    business: AdminBusiness,
+    isOpen: Boolean,
+    onOpen: () -> Unit,
+    onScanOwnerQr: () -> Unit,
+    onCreateOwnerPasskey: () -> Unit,
+    onOpenSubscription: () -> Unit,
+    onStatusChange: (String) -> Unit
+) {
+    val billingState = business.billingState()
+    val billingColor = when (billingState) {
+        AdminBillingState.PAID -> Color(0xFF17803F)
+        AdminBillingState.ACTIVE_UNVERIFIED -> Color(0xFF52736B)
+        AdminBillingState.TRIAL -> Color(0xFF3B5BB5)
+        AdminBillingState.EXPIRED -> Color(0xFFB3261E)
+        AdminBillingState.LOCKED -> Color(0xFF9A4B00)
+        AdminBillingState.UNKNOWN -> Color(0xFF5F6F6A)
+    }
+    Surface(color = Color.White, border = BorderStroke(1.dp, Color(0xFFD3DDD9)), shape = RoundedCornerShape(14.dp), modifier = Modifier.fillMaxWidth()) {
+        Column {
+            TextButton(onClick = onOpen, contentPadding = PaddingValues(12.dp), modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.fillMaxWidth()) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Surface(color = Color(0xFFE4EBE8), shape = RoundedCornerShape(10.dp)) { Text(business.shopName.take(1), modifier = Modifier.padding(horizontal = 11.dp, vertical = 8.dp), fontWeight = FontWeight.ExtraBold, fontSize = 15.sp) }
+                        Column(Modifier.weight(1f), horizontalAlignment = Alignment.Start) {
+                            Text(business.shopName, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Text(if (business.ownerEmail == "Pending owner enrollment") "No owner yet" else business.ownerEmail, fontSize = 11.sp, color = Color(0xFF5F6F6A), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            Row(horizontalArrangement = Arrangement.spacedBy(5.dp), modifier = Modifier.padding(top = 4.dp)) {
+                                AdminStatusPill(billingState.label, billingColor)
+                                if (business.status.equals("suspended", ignoreCase = true)) {
+                                    AdminStatusPill("Business suspended", Color(0xFFB86E00))
+                                } else if (business.status.equals("closed", ignoreCase = true)) {
+                                    AdminStatusPill("Business closed", Color(0xFF5F6F6A))
+                                }
+                            }
+                        }
+                    }
+                    Column(Modifier.fillMaxWidth().padding(start = 52.dp, top = 6.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(business.billingExpiryLabel(), fontSize = 11.sp, color = Color(0xFF344641), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(business.paymentRecordLabel(), fontSize = 10.sp, color = Color(0xFF5F6F6A), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+            AnimatedVisibility(isOpen) {
+                Column(Modifier.padding(horizontal = 12.dp).padding(bottom = 12.dp)) {
+                    HorizontalDivider()
+                    Row(Modifier.fillMaxWidth().padding(vertical = 10.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        FaithfulFact(business.memberCount.coerceAtLeast(1).minus(1).toString(), "Staff")
+                        FaithfulFact(business.productCount.toString(), "Products")
+                        FaithfulFact(business.stockUnits.toString(), "Units")
+                    }
+                    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+                        FaithfulFact("KSh ${business.paymentLockAmountKsh.takeIf { it > 0 } ?: business.subscriptionPriceKsh}", "Plan price")
+                        FaithfulFact("${business.subscriptionPlanDays}d", "Plan")
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Button(onClick = onScanOwnerQr, modifier = Modifier.weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) { Text("Scan QR", fontSize = 10.sp) }
+                        OutlinedButton(onClick = onCreateOwnerPasskey, modifier = Modifier.weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) { Text("Passkey", fontSize = 10.sp) }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = onOpenSubscription, modifier = Modifier.weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) { Text("Billing", fontSize = 10.sp) }
+                        OutlinedButton(onClick = { onStatusChange(if (business.status == "suspended") "active" else "suspended") }, modifier = Modifier.weight(1f), contentPadding = PaddingValues(vertical = 8.dp)) { Text(if (business.status == "suspended") "Reopen" else "Suspend", fontSize = 10.sp) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AdminStatusPill(label: String, color: Color) {
+    Surface(color = color.copy(alpha = .13f), shape = RoundedCornerShape(99.dp)) {
+        Text(label, color = color, fontSize = 9.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp), maxLines = 1)
+    }
+}
+
+@Composable
+private fun FaithfulFact(value: String, label: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) { Text(value, fontWeight = FontWeight.Bold, fontSize = 12.sp); Text(label, color = Color(0xFF5F6F6A), fontSize = 9.sp) }
 }

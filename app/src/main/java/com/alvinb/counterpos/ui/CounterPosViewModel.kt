@@ -7,9 +7,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.alvinb.counterpos.data.CounterPosRepository
+import com.alvinb.counterpos.data.SubscriptionEntitlement
+import com.alvinb.counterpos.data.SubscriptionManager
 import com.alvinb.counterpos.data.TableSettlementResult
 import com.alvinb.counterpos.data.remote.AdminBusiness
 import com.alvinb.counterpos.data.remote.AdminAuditEvent
+import com.alvinb.counterpos.data.remote.PlatformBillingSettings
 import com.alvinb.counterpos.data.remote.CounterReportRow
 import com.alvinb.counterpos.data.remote.ServiceCounter
 import com.alvinb.counterpos.data.SessionSnapshot
@@ -18,7 +21,7 @@ import com.alvinb.counterpos.data.local.entity.SaleEntity
 import com.alvinb.counterpos.data.local.entity.DiningTableEntity
 import com.alvinb.counterpos.data.local.entity.OutboxEntity
 import com.alvinb.counterpos.data.local.entity.SaleUnit
-import com.alvinb.counterpos.data.local.entity.parseSaleUnits
+import com.alvinb.counterpos.data.local.entity.resolveSaleUnits
 import com.alvinb.counterpos.data.local.entity.serializeSaleUnits
 import com.alvinb.counterpos.data.model.BusinessHours
 import com.alvinb.counterpos.data.model.DayBusinessHours
@@ -122,6 +125,9 @@ data class CounterPosUiState(
     val blockedTableSettlementIds: Set<String> = emptySet(),
     val adminSelectedBusinessId: String? = null,
     val adminQrRole: String = "owner",
+    val isLoadingAdminBusinesses: Boolean = false,
+    val hasFreshAdminBusinesses: Boolean = false,
+    val adminBusinessesError: String? = null,
     val isCreatingAdminBusiness: Boolean = false,
     val isCreatingBusiness: Boolean = false,
     val adminAuditEvents: List<AdminAuditEvent> = emptyList(),
@@ -184,12 +190,29 @@ data class CounterPosUiState(
     val blockedOutbox: List<OutboxEntity> = emptyList(),
     val isSyncRecoveryOpen: Boolean = false,
     val syncRecoveryError: String? = null,
-    val retryingOperationId: String? = null
+    val retryingOperationId: String? = null,
+
+    // Subscription & M-Pesa STK Push
+    val isSubscriptionModalOpen: Boolean = false,
+    val isInitiatingStkPush: Boolean = false,
+    val isPollingStkPayment: Boolean = false,
+    val stkCheckoutRequestId: String? = null,
+    val stkCustomerMessage: String? = null,
+    val subscriptionPaymentError: String? = null,
+    val isSubscriptionPaymentSuccess: Boolean = false,
+    val isSubscriptionEntitled: Boolean = true,
+    val subscriptionEntitlement: SubscriptionEntitlement? = null,
+    val adminSelectedSubscriptionBusiness: AdminBusiness? = null,
+    val isUpdatingSubscription: Boolean = false,
+    val platformBillingSettings: PlatformBillingSettings? = null,
+    val isLoadingPlatformBillingSettings: Boolean = false,
+    val isSavingPlatformBillingSettings: Boolean = false
 )
 
 class CounterPosViewModel(
     private val repository: CounterPosRepository,
-    private val connectivityManager: ConnectivityManager
+    private val connectivityManager: ConnectivityManager,
+    private val subscriptionManager: SubscriptionManager
 ) : ViewModel() {
     val session = repository.session.stateIn(viewModelScope, SharingStarted.Eagerly, SessionSnapshot())
     private val _adminBusinesses = MutableStateFlow<List<AdminBusiness>>(repository.getCachedAdminBusinesses())
@@ -210,6 +233,7 @@ class CounterPosViewModel(
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
             _uiState.update { it.copy(isOnline = true) }
+            refreshSubscriptionEntitlement()
             reconnectSyncJob?.cancel()
             reconnectSyncJob = viewModelScope.launch {
                 delay(150)
@@ -231,6 +255,7 @@ class CounterPosViewModel(
                     notice = "Offline mode. Sales and tables are stored locally."
                 )
             }
+            refreshSubscriptionEntitlement()
         }
     }
 
@@ -244,6 +269,7 @@ class CounterPosViewModel(
         runCatching { connectivityManager.registerDefaultNetworkCallback(networkCallback) }
         viewModelScope.launch {
             repository.session.collect { sess ->
+                refreshSubscriptionEntitlement(sess)
                 tableSettlementOutboxJob?.cancel()
                 if (sess.isPlatformAdmin) {
                     loadAdminBusinesses()
@@ -315,6 +341,7 @@ class CounterPosViewModel(
                 // Realtime invalidation is the primary refresh path. This remains
                 // a conservative fallback for background disconnects and missed events.
                 delay(30_000)
+                refreshSubscriptionEntitlement()
                 if (repository.session.value.isAuthenticated) {
                     val now = System.currentTimeMillis()
                     if (repository.session.value.activeBusiness != null) {
@@ -328,6 +355,24 @@ class CounterPosViewModel(
                     }
                 }
             }
+        }
+    }
+
+    private fun refreshSubscriptionEntitlement(
+        snapshot: SessionSnapshot = repository.session.value,
+        online: Boolean = _uiState.value.isOnline
+    ) {
+        val business = snapshot.activeBusiness
+        if (business == null || snapshot.isPlatformAdmin) {
+            _uiState.update { it.copy(isSubscriptionEntitled = true, subscriptionEntitlement = null) }
+            return
+        }
+        val entitlement = subscriptionManager.evaluateMembership(business, isOnline = online)
+        _uiState.update {
+            it.copy(
+                isSubscriptionEntitled = entitlement.isEntitled,
+                subscriptionEntitlement = entitlement
+            )
         }
     }
 
@@ -502,7 +547,8 @@ class CounterPosViewModel(
         businessType: String = "big_club",
         businessSize: String = "medium",
         inventoryMode: String = "shared",
-        counterCount: Int = 1
+        counterCount: Int = 1,
+        ownerPhone: String = ""
     ) = viewModelScope.launch {
         if (_uiState.value.isAuthenticating || _uiState.value.isCreatingBusiness) return@launch
         val cleanEmail = email.trim()
@@ -517,6 +563,11 @@ class CounterPosViewModel(
         }
         if (cleanName.isBlank()) {
             _uiState.update { it.copy(startupError = "Please enter your business name.") }
+            return@launch
+        }
+        val normalizedOwnerPhone = SubscriptionManager.normalizeKenyanPhone(ownerPhone)
+        if (normalizedOwnerPhone == null) {
+            _uiState.update { it.copy(startupError = "Enter a valid Kenyan owner mobile number.") }
             return@launch
         }
 
@@ -588,7 +639,7 @@ class CounterPosViewModel(
                 )
             }
 
-            repository.createBusiness(cleanName, businessType, businessSize, inventoryMode, counterCount)
+            repository.createBusiness(cleanName, businessType, businessSize, inventoryMode, counterCount, normalizedOwnerPhone)
             _uiState.update {
                 it.copy(
                     isCreatingBusiness = false,
@@ -623,12 +674,15 @@ class CounterPosViewModel(
         businessType: String = "big_club",
         businessSize: String = "medium",
         inventoryMode: String = "shared",
-        counterCount: Int = 1
+        counterCount: Int = 1,
+        ownerPhone: String = ""
     ) = viewModelScope.launch {
         if (_uiState.value.isCreatingBusiness) return@launch
         _uiState.update { it.copy(isCreatingBusiness = true, startupError = null, notice = "Creating your business…") }
         try {
-            repository.createBusiness(name, businessType, businessSize, inventoryMode, counterCount)
+            val normalizedOwnerPhone = SubscriptionManager.normalizeKenyanPhone(ownerPhone)
+                ?: throw IllegalArgumentException("Enter a valid Kenyan owner mobile number.")
+            repository.createBusiness(name, businessType, businessSize, inventoryMode, counterCount, normalizedOwnerPhone)
             _uiState.update { it.copy(startupError = null, notice = "Business created. Opening your workspace…") }
         } catch (error: CancellationException) {
             throw error
@@ -1040,17 +1094,72 @@ class CounterPosViewModel(
     }
 
     fun loadAdminBusinesses() = viewModelScope.launch {
+        if (_uiState.value.isLoadingAdminBusinesses) return@launch
         val cached = repository.getCachedAdminBusinesses()
         if (cached.isNotEmpty() && _adminBusinesses.value.isEmpty()) {
             _adminBusinesses.value = cached
         }
-        runCatching { repository.adminBusinesses() }
-            .onSuccess { _adminBusinesses.value = it }
-            .onFailure { error ->
-                if (_adminBusinesses.value.isEmpty()) {
-                    _uiState.update { it.copy(startupError = error.message ?: "Could not load businesses") }
+        _uiState.update { it.copy(isLoadingAdminBusinesses = true, adminBusinessesError = null) }
+        runCatching { repository.refreshAdminBusinesses() }
+            .onSuccess {
+                _adminBusinesses.value = it
+                _uiState.update {
+                    it.copy(
+                        isLoadingAdminBusinesses = false,
+                        hasFreshAdminBusinesses = true,
+                        adminBusinessesError = null
+                    )
                 }
             }
+            .onFailure { error ->
+                _uiState.update {
+                    it.copy(
+                        isLoadingAdminBusinesses = false,
+                        hasFreshAdminBusinesses = false,
+                        adminBusinessesError = error.message ?: "Could not refresh businesses"
+                    )
+                }
+            }
+    }
+
+    fun loadAdminPlatformBillingSettings() = viewModelScope.launch {
+        _uiState.update { it.copy(isLoadingPlatformBillingSettings = true) }
+        runCatching { repository.adminPlatformBillingSettings() }
+            .onSuccess { settings ->
+                _uiState.update { it.copy(platformBillingSettings = settings, isLoadingPlatformBillingSettings = false) }
+            }
+            .onFailure { error ->
+                _uiState.update {
+                    it.copy(
+                        isLoadingPlatformBillingSettings = false,
+                        startupError = error.message ?: "Could not load global billing settings"
+                    )
+                }
+            }
+    }
+
+    fun adminUpdatePlatformBillingSettings(trialDurationDays: Int, subscriptionPriceKsh: Int) = viewModelScope.launch {
+        if (_uiState.value.isSavingPlatformBillingSettings) return@launch
+        _uiState.update { it.copy(isSavingPlatformBillingSettings = true, startupError = null) }
+        runCatching {
+            repository.adminUpdatePlatformBillingSettings(trialDurationDays, subscriptionPriceKsh)
+        }.onSuccess { settings ->
+            _adminBusinesses.value = repository.getCachedAdminBusinesses()
+            _uiState.update {
+                it.copy(
+                    platformBillingSettings = settings,
+                    isSavingPlatformBillingSettings = false,
+                    notice = "Global billing settings saved. Current trials and paid terms remain unchanged."
+                )
+            }
+        }.onFailure { error ->
+            _uiState.update {
+                it.copy(
+                    isSavingPlatformBillingSettings = false,
+                    startupError = error.message ?: "Could not update global billing settings"
+                )
+            }
+        }
     }
 
     fun loadAdminAuditEvents(shopId: String = "") = viewModelScope.launch {
@@ -1077,6 +1186,7 @@ class CounterPosViewModel(
     fun createBusinessForOwner(
         name: String,
         ownerEmail: String,
+        ownerPhone: String,
         businessType: String = "big_club",
         businessSize: String = "medium",
         inventoryMode: String = "shared",
@@ -1084,8 +1194,13 @@ class CounterPosViewModel(
         onCreated: (() -> Unit)? = null
     ) = viewModelScope.launch {
         if (_uiState.value.isCreatingAdminBusiness) return@launch
+        val normalizedOwnerPhone = SubscriptionManager.normalizeKenyanPhone(ownerPhone)
+        if (normalizedOwnerPhone == null) {
+            _uiState.update { it.copy(startupError = "Enter a valid Kenyan owner mobile number.") }
+            return@launch
+        }
         _uiState.update { it.copy(isCreatingAdminBusiness = true, startupError = null) }
-        runCatching { repository.adminCreateBusiness(name, ownerEmail, businessType, businessSize, inventoryMode, counterCount) }
+        runCatching { repository.adminCreateBusiness(name, ownerEmail, businessType, businessSize, inventoryMode, counterCount, normalizedOwnerPhone) }
             .onSuccess { result ->
                 val businesses = result.businesses
                 _adminBusinesses.value = businesses
@@ -1158,6 +1273,315 @@ class CounterPosViewModel(
             .onFailure { error ->
                 _uiState.update { it.copy(startupError = error.message ?: "Could not return to Superadmin portal") }
             }
+    }
+
+    private var subscriptionPollingJob: Job? = null
+
+    fun dismissSubscriptionModal() {
+        subscriptionPollingJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isSubscriptionModalOpen = false,
+                isInitiatingStkPush = false,
+                isPollingStkPayment = false,
+                subscriptionPaymentError = null,
+                isSubscriptionPaymentSuccess = false
+            )
+        }
+    }
+
+    fun openSubscriptionModal() {
+        _uiState.update {
+            it.copy(
+                isSubscriptionModalOpen = true,
+                subscriptionPaymentError = null,
+                isSubscriptionPaymentSuccess = false
+            )
+        }
+    }
+
+    fun refreshCurrentBusinessSubscription() {
+        if (!_uiState.value.isOnline || repository.session.value.activeBusiness == null) return
+        viewModelScope.launch {
+            val wasEntitled = _uiState.value.isSubscriptionEntitled
+            val refreshed = repository.refreshActiveBusinessSubscription()
+            refreshSubscriptionEntitlement(refreshed, online = _uiState.value.isOnline)
+            if (!wasEntitled && _uiState.value.isSubscriptionEntitled) {
+                subscriptionPollingJob?.cancel()
+                _uiState.update {
+                    it.copy(
+                        isSubscriptionModalOpen = false,
+                        isPollingStkPayment = false,
+                        isInitiatingStkPush = false,
+                        subscriptionPaymentError = null
+                    )
+                }
+            }
+        }
+    }
+
+    fun initiateSubscriptionPayment(phoneNumber: String) {
+        if (_uiState.value.isInitiatingStkPush || _uiState.value.isPollingStkPayment) return
+        val cleanPhone = com.alvinb.counterpos.data.SubscriptionManager.normalizeKenyanPhone(phoneNumber)
+        if (cleanPhone == null) {
+            _uiState.update { it.copy(subscriptionPaymentError = "Please enter a valid Kenyan phone number (e.g. 0712 345 678 or 254712345678).") }
+            return
+        }
+
+        subscriptionPollingJob?.cancel()
+        _uiState.update {
+            it.copy(
+                isInitiatingStkPush = true,
+                isPollingStkPayment = false,
+                subscriptionPaymentError = null,
+                isSubscriptionPaymentSuccess = false,
+                stkCheckoutRequestId = null,
+                stkCustomerMessage = null
+            )
+        }
+
+        viewModelScope.launch {
+            try {
+                val response = repository.initiateSubscriptionStkPush(
+                    phoneNumber = cleanPhone
+                )
+                if (response.success && response.checkoutRequestId != null) {
+                    _uiState.update {
+                        it.copy(
+                            isInitiatingStkPush = false,
+                            isPollingStkPayment = true,
+                            stkCheckoutRequestId = response.checkoutRequestId,
+                            stkCustomerMessage = response.customerMessage ?: "M-Pesa STK push sent. Enter your M-Pesa PIN on your phone."
+                        )
+                    }
+                    startPollingSubscriptionStatus(response.checkoutRequestId)
+                } else {
+                    recoverOrShowSubscriptionPaymentFailure(
+                        response.error ?: "Failed to initiate M-Pesa payment. Please check its status before retrying."
+                    )
+                }
+            } catch (error: Exception) {
+                recoverOrShowSubscriptionPaymentFailure(
+                    error.message ?: "Could not confirm whether M-Pesa sent the prompt. Check payment status before retrying."
+                )
+            }
+        }
+    }
+
+    private suspend fun recoverOrShowSubscriptionPaymentFailure(message: String) {
+        val recovered = runCatching { repository.verifySubscriptionPaymentStatus() }.getOrNull()
+        if (recovered != null && (recovered.paymentStatus == "initiating" || recovered.paymentStatus == "pending")) {
+            _uiState.update {
+                it.copy(
+                    isInitiatingStkPush = false,
+                    isPollingStkPayment = true,
+                    subscriptionPaymentError = null,
+                    stkCheckoutRequestId = recovered.checkoutRequestId,
+                    stkCustomerMessage = recovered.message ?: message
+                )
+            }
+            startPollingSubscriptionStatus(recovered.checkoutRequestId)
+            return
+        }
+        _uiState.update {
+            it.copy(
+                isInitiatingStkPush = false,
+                isPollingStkPayment = false,
+                subscriptionPaymentError = message
+            )
+        }
+    }
+
+    private fun startPollingSubscriptionStatus(checkoutRequestId: String?) {
+        subscriptionPollingJob?.cancel()
+        subscriptionPollingJob = viewModelScope.launch {
+            var attempts = 0
+            val maxAttempts = 75
+            while (isActive && attempts < maxAttempts) {
+                delay(4000L)
+                attempts++
+                try {
+                    if (attempts % 4 == 0) {
+                        val payment = repository.verifySubscriptionPaymentStatus(checkoutRequestId)
+                        if (payment.checkoutRequestId != null && payment.checkoutRequestId != _uiState.value.stkCheckoutRequestId) {
+                            _uiState.update { it.copy(stkCheckoutRequestId = payment.checkoutRequestId) }
+                        }
+                        if (payment.paymentStatus == "failed") {
+                            _uiState.update {
+                                it.copy(
+                                    isPollingStkPayment = false,
+                                    subscriptionPaymentError = payment.message
+                                        ?: "M-Pesa did not complete the payment. You can start a new attempt."
+                                )
+                            }
+                            return@launch
+                        }
+                    }
+                    val statusResult = repository.checkSubscriptionStatus()
+                    val expectedCheckoutId = checkoutRequestId ?: statusResult.latestCheckoutRequestId
+                    if (isConfirmedSubscriptionPayment(statusResult, expectedCheckoutId)) {
+                        repository.refreshActiveBusinessSubscription()
+                        _uiState.update {
+                            it.copy(
+                                isPollingStkPayment = false,
+                                isSubscriptionPaymentSuccess = true,
+                                subscriptionPaymentError = null,
+                                notice = "Subscription activated successfully! Thank you for renewing."
+                            )
+                        }
+                        return@launch
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            if (isActive) {
+                _uiState.update {
+                    it.copy(
+                        isPollingStkPayment = false,
+                        subscriptionPaymentError = "Payment is still unconfirmed. Tap Check Now to ask Safaricom again; do not pay again if you already entered your PIN."
+                    )
+                }
+            }
+        }
+    }
+
+    fun verifySubscriptionPayment() {
+        viewModelScope.launch {
+            _uiState.update { it.copy(isPollingStkPayment = true, subscriptionPaymentError = null) }
+            try {
+                val payment = repository.verifySubscriptionPaymentStatus(_uiState.value.stkCheckoutRequestId)
+                repository.refreshActiveBusinessSubscription()
+                val statusResult = repository.checkSubscriptionStatus()
+                val expectedCheckoutId = payment.checkoutRequestId ?: _uiState.value.stkCheckoutRequestId
+                if (isConfirmedSubscriptionPayment(statusResult, expectedCheckoutId)) {
+                    _uiState.update {
+                        it.copy(
+                            isPollingStkPayment = false,
+                            isSubscriptionPaymentSuccess = true,
+                            subscriptionPaymentError = null,
+                            notice = "Subscription is active! All features restored."
+                        )
+                    }
+                } else if (payment.paymentStatus == "initiating" || payment.paymentStatus == "pending") {
+                    _uiState.update {
+                        it.copy(
+                            stkCheckoutRequestId = payment.checkoutRequestId ?: it.stkCheckoutRequestId,
+                            stkCustomerMessage = payment.message ?: it.stkCustomerMessage,
+                            isPollingStkPayment = true,
+                            subscriptionPaymentError = null
+                        )
+                    }
+                    startPollingSubscriptionStatus(payment.checkoutRequestId ?: _uiState.value.stkCheckoutRequestId)
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            isPollingStkPayment = false,
+                            subscriptionPaymentError = payment.message
+                                ?: "No completed M-Pesa payment was found. Check your phone or start a new payment attempt."
+                        )
+                    }
+                }
+            } catch (error: Exception) {
+                _uiState.update {
+                    it.copy(
+                        isPollingStkPayment = false,
+                        subscriptionPaymentError = error.message ?: "Could not verify payment status."
+                    )
+                }
+            }
+        }
+    }
+
+    private fun isConfirmedSubscriptionPayment(
+        status: com.alvinb.counterpos.data.remote.SubscriptionStatusResult,
+        checkoutRequestId: String?
+    ): Boolean = !checkoutRequestId.isNullOrBlank() &&
+        status.status.equals("active", ignoreCase = true) &&
+        status.latestPaymentStatus.equals("paid", ignoreCase = true) &&
+        status.latestCheckoutRequestId == checkoutRequestId
+
+    // Superadmin Subscription Management
+    fun adminOpenSubscriptionDialog(business: AdminBusiness) {
+        _uiState.update { it.copy(adminSelectedSubscriptionBusiness = business) }
+    }
+
+    fun adminCloseSubscriptionDialog() {
+        _uiState.update { it.copy(adminSelectedSubscriptionBusiness = null, isUpdatingSubscription = false) }
+    }
+
+    fun adminUpdateShopSubscription(
+        shopId: String,
+        priceKsh: Int? = null,
+        endsAtIso: String? = null,
+        status: String? = null,
+        planDays: Int? = null,
+        trialEndsAtIso: String? = null,
+        note: String? = null
+    ) = viewModelScope.launch {
+        _uiState.update { it.copy(isUpdatingSubscription = true, startupError = null) }
+        try {
+            val updated = repository.adminUpdateShopSubscription(
+                shopId = shopId,
+                priceKsh = priceKsh,
+                endsAtIso = endsAtIso,
+                status = status,
+                planDays = planDays,
+                trialEndsAtIso = trialEndsAtIso,
+                note = note
+            )
+            _adminBusinesses.value = updated
+            _uiState.update {
+                it.copy(
+                    isUpdatingSubscription = false,
+                    adminSelectedSubscriptionBusiness = updated.firstOrNull { b -> b.shopId == shopId },
+                    notice = "Store subscription updated successfully"
+                )
+            }
+        } catch (error: Exception) {
+            _uiState.update {
+                it.copy(
+                    isUpdatingSubscription = false,
+                    startupError = error.message ?: "Could not update subscription"
+                )
+            }
+        }
+    }
+
+    fun adminExtendTrial(shopId: String, daysToAdd: Int = 14) {
+        val target = _adminBusinesses.value.firstOrNull { it.shopId == shopId }
+        val baseTime = target?.trialEndsAt?.let { com.alvinb.counterpos.data.SubscriptionManager.parseTimestamp(it) } ?: System.currentTimeMillis()
+        val newTime = maxOf(baseTime, System.currentTimeMillis()) + (daysToAdd * 86400000L)
+        val iso = java.time.Instant.ofEpochMilli(newTime).toString()
+        adminUpdateShopSubscription(shopId = shopId, trialEndsAtIso = iso, status = "trial")
+    }
+
+    fun adminActivatePaidTerm(shopId: String, daysToAdd: Int = 30, priceKsh: Int? = null) {
+        val target = _adminBusinesses.value.firstOrNull { it.shopId == shopId }
+        val baseTime = target?.subscriptionEndsAt?.let { com.alvinb.counterpos.data.SubscriptionManager.parseTimestamp(it) } ?: System.currentTimeMillis()
+        val newTime = maxOf(baseTime, System.currentTimeMillis()) + (daysToAdd * 86400000L)
+        val iso = java.time.Instant.ofEpochMilli(newTime).toString()
+        adminUpdateShopSubscription(shopId = shopId, endsAtIso = iso, status = "active", planDays = daysToAdd, priceKsh = priceKsh)
+    }
+
+    fun adminSetPaymentLock(shopId: String, locked: Boolean, amountKsh: Int? = null, reason: String? = null) {
+        if (_uiState.value.isUpdatingSubscription) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(isUpdatingSubscription = true, startupError = null) }
+            runCatching { repository.adminSetShopPaymentLock(shopId, locked, amountKsh, reason) }
+                .onSuccess { updated ->
+                    _adminBusinesses.value = updated
+                    _uiState.update {
+                        it.copy(
+                            isUpdatingSubscription = false,
+                            adminSelectedSubscriptionBusiness = updated.firstOrNull { b -> b.shopId == shopId },
+                            notice = if (locked) "Payment lock started for the business" else "Payment lock cleared"
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(isUpdatingSubscription = false, startupError = error.message ?: "Could not update payment lock") }
+                }
+        }
     }
 
     fun openAdminEnrollmentScanner(shopId: String, role: String) {
@@ -1271,7 +1695,12 @@ class CounterPosViewModel(
                         _uiState.update { it.copy(isScannerOpen = false, startupError = "Business QR must contain a name and registered owner email.") }
                     } else {
                         _uiState.update { it.copy(isScannerOpen = false, startupError = null, notice = "Registering $name…") }
-                        createBusinessForOwner(name, ownerEmail)
+                        _uiState.update {
+                            it.copy(
+                                isScannerOpen = false,
+                                startupError = "This older business QR does not include the owner's mobile number. Use Register Tenant and enter the owner's phone."
+                            )
+                        }
                     }
                     return
                 }
@@ -1533,13 +1962,13 @@ class CounterPosViewModel(
     }
 
     fun openTableSale(tableId: String, product: ProductEntity) {
-        val units = parseSaleUnits(product.salesUnitsJson, product.sellingPriceKsh)
+        val units = resolveSaleUnits(product)
         val bulkOnly = units.isNotEmpty() && units.all { it.stockUnitsPerSale == 0 }
         if (!product.inMyStock || (product.stockQuantity <= 0 && !bulkOnly)) {
             _uiState.update { it.copy(actionError = "${product.name} is out of stock.") }
             return
         }
-        val defaultUnit = units.firstOrNull() ?: SaleUnit("Bottle", product.sellingPriceKsh)
+        val defaultUnit = units.firstOrNull() ?: SaleUnit("Bottle", product.sellingPriceKsh.coerceAtLeast(0))
         val defaultCounterId = _uiState.value.selectedServingCounterId
             ?: _uiState.value.selectedCounterId
             ?: serviceCounters.value.firstOrNull()?.id
@@ -1633,7 +2062,7 @@ class CounterPosViewModel(
     }
 
     fun handleScannedSale(product: ProductEntity) {
-        val units = parseSaleUnits(product.salesUnitsJson, product.sellingPriceKsh)
+        val units = resolveSaleUnits(product)
         val bulkOnly = units.isNotEmpty() && units.all { it.stockUnitsPerSale == 0 }
         if (!product.inMyStock || (product.stockQuantity < 1 && !bulkOnly)) {
             _uiState.update {
@@ -1654,7 +2083,7 @@ class CounterPosViewModel(
             _uiState.update { it.copy(isScannerOpen = false, notice = "Open a table before scanning a product.") }
             return
         }
-        val units = parseSaleUnits(product.salesUnitsJson, product.sellingPriceKsh)
+        val units = resolveSaleUnits(product)
         val bulkOnly = units.isNotEmpty() && units.all { it.stockUnitsPerSale == 0 }
         if (!product.inMyStock || (product.stockQuantity < 1 && !bulkOnly)) {
             _uiState.update {
@@ -1695,7 +2124,7 @@ class CounterPosViewModel(
                     stockMode = StockMode.LIBRARY,
                     selectedCatalogCode = product.catalogCode,
                     catalogInitialStock = 12,
-                    catalogSellingPrice = product.suggestedPriceKsh.toString(),
+                    catalogSellingPrice = "",
                     notice = "Found ${product.name}. Set price & bottles to add to stock."
                 )
             }
@@ -1726,8 +2155,8 @@ class CounterPosViewModel(
 
     // Selling & Unit of Sales
     fun openSale(product: ProductEntity) {
-        val units = parseSaleUnits(product.salesUnitsJson, product.sellingPriceKsh)
-        val defaultUnit = units.firstOrNull() ?: SaleUnit("Bottle", product.sellingPriceKsh)
+        val units = resolveSaleUnits(product)
+        val defaultUnit = units.firstOrNull() ?: SaleUnit("Bottle", product.sellingPriceKsh.coerceAtLeast(0))
         _uiState.update {
             it.copy(
                 selectedSaleCode = product.catalogCode,
@@ -2069,7 +2498,7 @@ class CounterPosViewModel(
         it.copy(
             selectedCatalogCode = product.catalogCode,
             catalogInitialStock = 12,
-            catalogSellingPrice = product.suggestedPriceKsh.toString(),
+            catalogSellingPrice = "",
             actionError = null
         )
     }
@@ -2145,13 +2574,14 @@ class CounterPosViewModel(
 
 class CounterPosViewModelFactory(
     private val repository: CounterPosRepository,
-    private val connectivityManager: ConnectivityManager
+    private val connectivityManager: ConnectivityManager,
+    private val subscriptionManager: SubscriptionManager
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         if (!modelClass.isAssignableFrom(CounterPosViewModel::class.java)) {
             throw IllegalArgumentException("Unknown ViewModel class: ${modelClass.name}")
         }
-        return CounterPosViewModel(repository, connectivityManager) as T
+        return CounterPosViewModel(repository, connectivityManager, subscriptionManager) as T
     }
 }
